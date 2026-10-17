@@ -1,0 +1,54 @@
+name: RSI Scanner
+
+on:
+  schedule:
+    - cron: '0,30 3-10 * * 1-5'
+    - cron: '40 4-9 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Kaunsa scan chalana hai'
+        type: choice
+        default: both
+        options: [hourly, daily, both]
+      force:
+        description: 'Market time ka check ignore karo (sirf testing ke liye)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: rsi-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Aaj ki date (IST)
+        id: d
+        run: echo "date=$(TZ=Asia/Kolkata date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: History cache
+        uses: actions/cache@v4
+        with:
+          path: hist_cache.json.gz
+          key: rsi-hist-${{ steps.d.outputs.date }}
+
+      - name: Scanner chalao
+        env:
+          UPSTOX_TOKEN: ${{ secrets.UPSTOX_TOKEN }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '40 4-9 * * 1-5' && 'daily' || 'hourly') }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || 'false' }}
+        run: python scanner.py
