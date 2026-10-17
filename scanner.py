@@ -274,10 +274,9 @@ def main():
         return
 
     ws = open_sheet()
-    values = ws.get_all_values()
-    if not values:
-        ws.append_row(HEADER, value_input_option="RAW")
-        values = [HEADER]
+    # Header har run mein pakka likho (khali sheet par gspread [[]] deta hai, isliye "khali hai kya" check bharosemand nahi)
+    ws.update(range_name="A1:G1", values=[HEADER], value_input_option="RAW")
+    values = ws.get_all_values() or []
     already = {r[2].strip() for r in values[1:] if len(r) > 2 and r[0].strip() == today_s}
 
     new_rows = []
@@ -287,7 +286,11 @@ def main():
         new_rows += scan_timeframe("1 DAY", "days", stocks, cache, today_d, today_s, now, already)
 
     if new_rows:
-        ws.append_rows(new_rows, value_input_option="RAW")
+        ws.append_rows(new_rows, value_input_option="RAW", table_range="A1")
+    # H1 mein "last scan" likho, taaki sheet mein dikhe ki scanner zinda hai
+    ws.update(range_name="H1",
+              values=[["Last scan: %s %s IST | %s | naye: %d" % (today_s, now.strftime("%H:%M"), MODE, len(new_rows))]],
+              value_input_option="RAW")
     save_cache(cache)
     print("Scan complete: %d naye stock sheet mein jode." % len(new_rows))
 
