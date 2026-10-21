@@ -31,8 +31,8 @@ TAB_NAME = "RSI SCANNER"
 HEADER = ["Date", "Time", "Stock", "Timeframe", "RSI", "Price", "Signal"]
 
 RSI_PERIOD = 14
-UPPER = 80
-LOWER = 20
+UPPER = 75
+LOWER = 25
 
 HIST_HOURS_DAYS = 45    # purani 1 HOUR candles (1 quarter ki limit ke andar)
 HIST_DAYS_DAYS = 200    # purani 1 DAY candles
@@ -223,9 +223,9 @@ def scan_timeframe(label, unit, stocks, cache, today_d, today_s, now, already):
         if value is None:
             continue
         if value > UPPER:
-            signal = "RSI 80+ (Overbought)"
+            signal = "RSI 75+ (Overbought)"
         elif value < LOWER:
-            signal = "RSI 20- (Oversold)"
+            signal = "RSI 25- (Oversold)"
         else:
             continue
         rows.append([today_s, now.strftime("%H:%M"), symbol, label,
