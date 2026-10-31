@@ -2,7 +2,7 @@ name: RSI Scanner
 
 on:
   schedule:
-    - cron: '0,30 3-10 * * 1-5'
+    - cron: '0 3-10 * * 1-5'
     - cron: '40 4-9 * * 1-5'
   workflow_dispatch:
     inputs:
