@@ -1,0 +1,41 @@
+name: EMA Daily Scanner
+
+on:
+  schedule:
+    # Backup: GitHub ke schedule late chalte hain, asli alarm Apps Script (ghAlarm) deta hai.
+    # Time UTC mein hai (IST = UTC + 5:30): 4:00 PM IST, sirf Mon-Fri. Script din mein ek hi baar chalta hai.
+    - cron: '30 10 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Market time / din ka check ignore karo (sirf testing ke liye)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ema-daily
+  cancel-in-progress: false
+
+jobs:
+  ema-daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: EMA Daily scanner chalao
+        env:
+          UPSTOX_TOKEN: ${{ secrets.UPSTOX_TOKEN }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || 'false' }}
+        run: python ema_daily.py
