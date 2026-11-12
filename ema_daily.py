@@ -1,5 +1,5 @@
 """
-EMA DAILY scanner: Nifty 500 (Upstox 1 DAY data) -> Google Sheet tab "EMA DAILY" + Telegram alert
+EMA DAILY scanner: Nifty 500 (Upstox 1 DAY data) -> Google Sheet tab "EMA DAILY" (sirf sheet, Telegram nahi)
 
 Setup = "EMA pullback + retest breakout", sirf 1 DAY candle, din mein EK baar, market band hone ke baad:
 
@@ -10,13 +10,19 @@ Setup = "EMA pullback + retest breakout", sirf 1 DAY candle, din mein EK baar, m
              Sheet ke "Support" column mein likha aata hai ki low ne kaun si EMA ko (sabse gehri) touch kiya.
 3. Entry   : pullback ke low ke baad (max 6 candles ke andar) ek bullish candle jo sabhi 4 EMAs ke upar close kare.
              Candle type: Lambi green body, Bullish engulfing, Gap-up green, ya Hammer.
-4. Extra   : volume >= 1.5x (pichle 20 din ka average), RSI(14) 55 se 70, MACD(12,26,9) bullish crossover
-             (aaj ya pichli 3 candles mein), close Rs 250 se Rs 4000 ke beech.
-5. Tag     : chaaron EMAs ka spread = (sabse upar - sabse neeche) / close. 5% ya kam ho to "TIGHT" (paas-paas).
-             TIGHT wale sheet aur Telegram mein pehle aate hain. Wide wale hataye nahi jaate.
+4. Price   : close Rs 250 se Rs 4000 ke beech.
+5. Do level (sheet ke "Match" column mein):
+   - "ALL MATCH": upar ka EMA setup + volume >= 1.5x (pichle 20 din ka average) + RSI(14) 55 se 70
+                  + MACD(12,26,9) bullish crossover (aaj ya pichli 3 candles mein).
+   - "EMA ONLY" : sirf EMA setup poora; volume / RSI / MACD mein se koi match na ho to bhi aata hai.
+                  Volume, RSI, MACD ke columns mein dikhta hai ki kaun sa match hua (check) aur kaun sa nahi (cross).
+6. Tag     : chaaron EMAs ka spread = (sabse upar - sabse neeche) / close. 5% ya kam ho to "TIGHT" (paas-paas).
+             Sheet mein ALL MATCH pehle, phir EMA ONLY; dono mein TIGHT wale pehle. Wide wale hataye nahi jaate.
 
-Ek hi signal baar-baar nahi aata: pichli 6 candles mein wahi setup pehle ban chuka ho to skip.
-Din mein ek hi baar chalta hai (sheet ke M1 mein DONE likha ho to dobara skip), FORCE=true se test kar sakte ho.
+Ek hi signal baar-baar nahi aata: pichli 6 candles mein wahi (ya behtar) level pehle aa chuka ho to skip.
+(EMA ONLY ke baad usi setup mein sab kuch match ho jaye to ALL MATCH naya aa jata hai.)
+Din mein ek hi baar chalta hai (sheet ke O1 mein DONE likha ho to dobara skip), FORCE=true se test kar sakte ho.
+Sheet mein O1 = status, O2 = funnel (kitne stocks har shart par bache).
 """
 import csv
 import io
@@ -40,9 +46,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 FORCE = os.environ.get("FORCE", "").strip().lower() in ("1", "true", "yes")
 
 TAB = "EMA DAILY"
-HEADER = ["Date", "Stock", "Close", "Candle type", "Support", "EMA spread %", "Tight",
-          "Vol x avg", "RSI", "Impulse gain %", "Scan time"]
-STATUS_CELL = "M1"
+HEADER = ["Date", "Stock", "Match", "Close", "Candle type", "Support", "EMA spread %", "Tight",
+          "Volume", "RSI", "MACD", "Impulse gain %", "Scan time"]
+STATUS_CELL = "O1"
+FUNNEL_CELL = "O2"
+TELEGRAM_ALL_MATCH = False   # True karoge to sirf "ALL MATCH" wale Telegram par bhi jayenge (abhi band)
 
 # ---- rules (yahan se badal sakte ho)
 PRICE_MIN = 250
@@ -317,41 +325,73 @@ def pullback_info(d, i):
     return {"P": P, "X": X, "T": T, "gain": gain, "support": label}
 
 
-def qualifies(d, i):
+def indicator_flags(d, i):
+    """Volume, RSI, MACD: match hua ya nahi, aur sheet mein dikhane ka text."""
+    window = d.v[i - VOL_AVG_N:i]
+    avg = sum(window) / len(window) if window else 0.0
+    vr = d.v[i] / avg if avg > 0 else 0.0
+    vol_ok = vr >= VOL_MULT
+    r = d.rsi[i]
+    rsi_ok = r is not None and RSI_MIN <= r <= RSI_MAX
+    macd_ok = macd_cross(d, i)
+    if macd_ok:
+        macd_txt = "\u2713 crossover"
+    elif d.macd[i] > d.sig[i]:
+        macd_txt = "\u2717 cross nahi (signal ke upar)"
+    else:
+        macd_txt = "\u2717 signal ke neeche"
+    return {"vol": vr, "vol_ok": vol_ok, "vol_txt": "%.1fx %s" % (vr, "\u2713" if vol_ok else "\u2717"),
+            "rsi": r, "rsi_ok": rsi_ok,
+            "rsi_txt": ("%.0f %s" % (r, "\u2713" if rsi_ok else "\u2717")) if r is not None else "-",
+            "macd_ok": macd_ok, "macd_txt": macd_txt}
+
+
+def evaluate(d, i, stats=None):
+    """Candle i ka level: "ALL" (sab match), "EMA" (sirf EMA setup), warna None.
+    stats dict diya ho to har shart par kitne stocks bache, wo ginta hai (funnel ke liye)."""
+    def hit(k):
+        if stats is not None:
+            stats[k] = stats.get(k, 0) + 1
+
     if i < MIN_CANDLES - 1 or i < 1:
         return None
     c = d.c[i]
     if not (PRICE_MIN <= c <= PRICE_MAX):
         return None
+    hit("price")
     if not d.up[i]:
         return None
+    hit("up")
     types = candle_types(d, i)
     if not types:
         return None
-    r = d.rsi[i]
-    if r is None or not (RSI_MIN <= r <= RSI_MAX):
-        return None
-    if not macd_cross(d, i):
-        return None
-    window = d.v[i - VOL_AVG_N:i]
-    avg = sum(window) / len(window) if window else 0.0
-    if avg <= 0 or d.v[i] / avg < VOL_MULT:
-        return None
+    hit("candle")
     pb = pullback_info(d, i)
     if not pb:
         return None
+    hit("setup")
+    f = indicator_flags(d, i)
+    for k in ("vol", "rsi", "macd"):
+        if f[k + "_ok"]:
+            hit(k)
+    level = "ALL" if (f["vol_ok"] and f["rsi_ok"] and f["macd_ok"]) else "EMA"
+    if level == "ALL":
+        hit("all")
     spread = (d.top[i] - d.bot[i]) / c * 100.0
-    return {"close": c, "types": " + ".join(types), "support": pb["support"], "spread": spread,
-            "tight": spread <= TIGHT_PCT, "vol": d.v[i] / avg, "rsi": r, "gain": pb["gain"]}
+    return {"level": level, "close": c, "types": " + ".join(types), "support": pb["support"],
+            "spread": spread, "tight": spread <= TIGHT_PCT, "gain": pb["gain"],
+            "vol_txt": f["vol_txt"], "rsi_txt": f["rsi_txt"], "macd_txt": f["macd_txt"]}
 
 
-def signal_today(d, i):
-    """Aaj (candle i) ka naya signal. Pichli 6 candles mein wahi setup ban chuka ho to None."""
-    q = qualifies(d, i)
+def signal_today(d, i, stats=None):
+    """Aaj (candle i) ka naya signal. Pichli 6 candles mein wahi ya behtar level aa chuka ho to None.
+    (Pehle EMA ONLY aaya ho aur ab ALL MATCH ho gaya, to ALL MATCH naya maana jata hai.)"""
+    q = evaluate(d, i, stats)
     if not q:
         return None
     for j in range(max(MIN_CANDLES - 1, i - MAX_AFTER_LOW), i):
-        if qualifies(d, j):
+        e = evaluate(d, j)
+        if e and (q["level"] == "EMA" or e["level"] == "ALL"):
             return None
     return q
 
@@ -421,13 +461,14 @@ def send_telegram(text):
 
 
 def telegram_text(signals):
+    """Sirf ALL MATCH wale (TELEGRAM_ALL_MATCH = True hone par)."""
     def line(s):
-        return "• %s | Close %s | %s | Support %s | spread %.1f%% | Vol %.1fx | RSI %.0f" % (
-            s["stock"], round(s["close"], 2), s["types"], s["support"], s["spread"], s["vol"], s["rsi"])
+        return "\u2022 %s | Close %s | %s | Support %s | spread %.1f%% | Vol %s | RSI %s" % (
+            s["stock"], round(s["close"], 2), s["types"], s["support"], s["spread"], s["vol_txt"], s["rsi_txt"])
 
     tight = [s for s in signals if s["tight"]]
     rest = [s for s in signals if not s["tight"]]
-    out = "📊 EMA DAILY (pullback + breakout): %d stock\n" % len(signals)
+    out = "\U0001F4CA EMA DAILY ALL MATCH: %d stock\n" % len(signals)
     if tight:
         out += "\nTIGHT (EMAs paas-paas):\n" + "\n".join(line(s) for s in tight) + "\n"
     if rest:
@@ -440,7 +481,7 @@ def run_scan(stocks, now, ws):
     today_s = now.date().isoformat()
     today_d = now.date()
     st = {"checked": 0, "no_today": 0, "short": 0, "no_data": 0}
-    signals, partial = [], False
+    signals, partial, fun = [], False, {}
     try:
         for sym, key in stocks:
             candles = fetch_daily(key, today_d)
@@ -458,7 +499,7 @@ def run_scan(stocks, now, ws):
                 continue
             d = Data(rows)
             st["checked"] += 1
-            q = signal_today(d, len(rows) - 1)
+            q = signal_today(d, len(rows) - 1, fun)
             if q:
                 q["stock"], q["date"] = sym, rows[-1][0]
                 signals.append(q)
@@ -466,23 +507,33 @@ def run_scan(stocks, now, ws):
         partial = True
         print("Upstox limit ki wajah se scan beech mein ruka.")
 
-    signals.sort(key=lambda s: (not s["tight"], s["spread"]))
+    signals.sort(key=lambda s: (s["level"] != "ALL", not s["tight"], s["spread"]))
     seen = {(r[0], r[1]) for r in (ws.get_all_values() or [])[1:] if len(r) > 1}
     new = [s for s in signals if (s["date"], s["stock"]) not in seen]
     if new:
         ws.append_rows(
-            [[s["date"], s["stock"], round(s["close"], 2), s["types"], s["support"], round(s["spread"], 1),
-              "TIGHT" if s["tight"] else "", round(s["vol"], 1), round(s["rsi"], 1), round(s["gain"], 1),
-              now.strftime("%H:%M")] for s in new],
+            [[s["date"], s["stock"], "ALL MATCH" if s["level"] == "ALL" else "EMA ONLY", round(s["close"], 2),
+              s["types"], s["support"], round(s["spread"], 1), "TIGHT" if s["tight"] else "",
+              s["vol_txt"], s["rsi_txt"], s["macd_txt"], round(s["gain"], 1), now.strftime("%H:%M")] for s in new],
             value_input_option="RAW", table_range="A1")
-        send_telegram(telegram_text(new))
+        new_all = [s for s in new if s["level"] == "ALL"]
+        if TELEGRAM_ALL_MATCH and new_all:
+            send_telegram(telegram_text(new_all))
     # DONE tabhi likhte hain jab kuch check hua ho; aaj ka candle hi na mila (holiday / data nahi aaya) to dobara chal sakta hai
     state = "PARTIAL" if partial else ("NO-CANDLE" if st["checked"] == 0 and st["no_today"] > 0 else "DONE")
     ws.update(range_name=STATUS_CELL, values=[[
         "Last scan: %s %s IST | %s | stocks: %d | checked: %d | aaj ka candle nahi: %d | history kam: %d | "
-        "data nahi mila: %d | naye signal: %d | Upstox calls: %d" % (
+        "data nahi mila: %d | naye signal: %d (ALL MATCH: %d, EMA ONLY: %d) | Upstox calls: %d" % (
             today_s, now.strftime("%H:%M"), state, len(stocks), st["checked"],
-            st["no_today"], st["short"], st["no_data"], len(new), LIMITER.total)]], value_input_option="RAW")
+            st["no_today"], st["short"], st["no_data"], len(new),
+            sum(1 for x in new if x["level"] == "ALL"), sum(1 for x in new if x["level"] == "EMA"),
+            LIMITER.total)]], value_input_option="RAW")
+    ws.update(range_name=FUNNEL_CELL, values=[[
+        "Funnel (%d stock): price Rs %d-%d: %d > close chaaron EMAs ke upar: %d > entry candle: %d > impulse+pullback (EMA setup): %d"
+        " | in mein: volume ok: %d, RSI ok: %d, MACD ok: %d | ALL MATCH: %d" % (
+            st["checked"], PRICE_MIN, PRICE_MAX, fun.get("price", 0), fun.get("up", 0), fun.get("candle", 0),
+            fun.get("setup", 0), fun.get("vol", 0), fun.get("rsi", 0), fun.get("macd", 0), fun.get("all", 0))]],
+        value_input_option="RAW")
     print("Scan: checked=%d naye=%d calls=%d partial=%s" % (st["checked"], len(new), LIMITER.total, partial))
 
 
@@ -509,7 +560,7 @@ def main():
     if not FORCE and already_done(ws, now.date().isoformat()):
         print("Aaj ka scan ho chuka hai, skip.")
         return
-    ws.update(range_name="A1:K1", values=[HEADER], value_input_option="RAW")
+    ws.update(range_name="A1:M1", values=[HEADER], value_input_option="RAW")
     run_scan(stocks, now, ws)
 
 
