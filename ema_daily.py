@@ -434,13 +434,19 @@ def open_book():
     return client.open_by_key(SHEET_ID)
 
 
-def get_ws(book, title, rows=1000, cols=14):
+def get_ws(book, title, rows=1000, cols=16):
     from gspread.exceptions import WorksheetNotFound
 
     try:
         return book.worksheet(title)
     except WorksheetNotFound:
         return book.add_worksheet(title=title, rows=rows, cols=cols)
+
+
+def ensure_cols(ws, n):
+    """Purana tab 14 columns ka ho sakta hai; O1/O2 (15vi column) ke liye jagah banao."""
+    if getattr(ws, "col_count", n) < n:
+        ws.resize(cols=n)
 
 
 def send_telegram(text):
@@ -557,6 +563,7 @@ def main():
             return
     stocks = load_nifty500()
     ws = get_ws(open_book(), TAB)
+    ensure_cols(ws, 16)
     if not FORCE and already_done(ws, now.date().isoformat()):
         print("Aaj ka scan ho chuka hai, skip.")
         return
